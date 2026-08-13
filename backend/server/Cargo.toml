@@ -14,6 +14,10 @@ crate-type = ["lib", "cdylib"]
 name = "server"
 path = "src/main.rs"
 
+[[bin]]
+name = "rakuyomi-cli"
+path = "src/bin/cli.rs"
+
 [features]
 default = ["use_nix"]
 ffi = ["dep:serde_bytes", "dep:reqwest", "dep:jni", "shared/ffi"]
