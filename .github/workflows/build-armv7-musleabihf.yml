@@ -1,0 +1,41 @@
+name: Build armv7-unknown-linux-musleabihf (musl static)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-armv7-musl:
+    name: Build armv7 (musl static)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install cross (for cross-compilation)
+        run: |
+          cargo install --locked cross || true
+
+      - name: Ensure rust target
+        run: rustup target add armv7-unknown-linux-musleabihf || true
+
+      - name: Build workspace release with cross (musl static)
+        run: |
+          cross build --workspace --release --target armv7-unknown-linux-musleabihf
+
+      - name: List artifacts
+        run: ls -lh target/armv7-unknown-linux-musleabihf/release || true
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: armv7-musleabihf-release
+          path: target/armv7-unknown-linux-musleabihf/release/

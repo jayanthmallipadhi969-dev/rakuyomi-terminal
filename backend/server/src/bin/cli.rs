@@ -2,11 +2,11 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
-use tokio::sync::CancellationToken;
 
 use shared::model::{MangaId, SourceId};
+use shared::usecases::fetch_manga_chapters_in_batch::ProgressReport;
 
-use crate::app::{build_state, init_logging};
+use crate::{build_state, init_logging};
 
 /// Minimal terminal-only Rakuyomi CLI. Provides searching and downloading
 /// without the full UI, designed to be lightweight.
@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     repl_loop(state).await
 }
 
-async fn repl_loop(state: crate::state::State) -> anyhow::Result<()> {
+async fn repl_loop(state: server::state::State) -> anyhow::Result<()> {
     println!("Rakuyomi terminal (type 'help' for commands)");
 
     let mut input = String::new();
@@ -144,7 +144,7 @@ fn print_help() {
     println!("  exit, quit         Exit");
 }
 
-async fn list_sources(state: &crate::state::State) -> anyhow::Result<()> {
+async fn list_sources(state: &server::state::State) -> anyhow::Result<()> {
     let manager = state.source_manager.lock().await.clone();
     for source in manager.sources() {
         let manifest = source.manifest();
@@ -153,7 +153,7 @@ async fn list_sources(state: &crate::state::State) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn set_storage_path(state: &crate::state::State, path: String) -> anyhow::Result<()> {
+async fn set_storage_path(state: &server::state::State, path: String) -> anyhow::Result<()> {
     let mut settings_guard = state.settings.lock().await;
     settings_guard.storage_path = Some(PathBuf::from(path.clone()));
     settings_guard
@@ -169,7 +169,7 @@ async fn set_storage_path(state: &crate::state::State, path: String) -> anyhow::
     Ok(())
 }
 
-async fn set_ram(state: &crate::state::State, flag: String) -> anyhow::Result<()> {
+async fn set_ram(state: &server::state::State, flag: String) -> anyhow::Result<()> {
     let mut settings_guard = state.settings.lock().await;
     match flag.as_str() {
         "on" | "true" | "1" => {
@@ -181,7 +181,10 @@ async fn set_ram(state: &crate::state::State, flag: String) -> anyhow::Result<()
             // Try to enable RAM on chapter storage
             let mut cs = state.chapter_storage.lock().await;
             match cs.enable_ram(settings_guard.ram_storage_size_mb) {
-                Ok(_) => println!("RAM storage enabled (size {} MB)", settings_guard.ram_storage_size_mb),
+                Ok(_) => println!(
+                    "RAM storage enabled (size {} MB)",
+                    settings_guard.ram_storage_size_mb
+                ),
                 Err(e) => println!("Failed to enable RAM storage: {}", e),
             }
         }
@@ -200,8 +203,10 @@ async fn set_ram(state: &crate::state::State, flag: String) -> anyhow::Result<()
     Ok(())
 }
 
-async fn set_concurrent(state: &crate::state::State, n: String) -> anyhow::Result<()> {
-    let parsed = n.parse::<usize>().map_err(|_| anyhow::anyhow!("invalid number"))?;
+async fn set_concurrent(state: &server::state::State, n: String) -> anyhow::Result<()> {
+    let parsed = n
+        .parse::<usize>()
+        .map_err(|_| anyhow::anyhow!("invalid number"))?;
     let mut settings_guard = state.settings.lock().await;
     settings_guard.concurrent_requests_pages = Some(parsed);
     settings_guard
@@ -211,7 +216,7 @@ async fn set_concurrent(state: &crate::state::State, n: String) -> anyhow::Resul
     Ok(())
 }
 
-async fn set_proxy(state: &crate::state::State, val: String) -> anyhow::Result<()> {
+async fn set_proxy(state: &server::state::State, val: String) -> anyhow::Result<()> {
     let mut settings_guard = state.settings.lock().await;
     if val.eq_ignore_ascii_case("none") || val.eq_ignore_ascii_case("null") {
         settings_guard.proxy_url = None;
@@ -230,7 +235,7 @@ async fn set_proxy(state: &crate::state::State, val: String) -> anyhow::Result<(
     Ok(())
 }
 
-async fn install_sources(state: &crate::state::State) -> anyhow::Result<()> {
+async fn install_sources(state: &server::state::State) -> anyhow::Result<()> {
     let settings_guard = state.settings.lock().await.clone();
     if settings_guard.source_lists.is_empty() {
         println!("No source lists configured in settings.source_lists");
@@ -244,13 +249,18 @@ async fn install_sources(state: &crate::state::State) -> anyhow::Result<()> {
 
     println!("Available sources:");
     for src in available.iter() {
-        println!("{} - {}  (from {})", src.id.value(), src.name, src.source_of_source.clone().unwrap_or_default());
+        println!(
+            "{} - {}  (from {})",
+            src.id.value(),
+            src.name,
+            src.source_of_source.clone().unwrap_or_default()
+        );
     }
 
     Ok(())
 }
 
-async fn install_source(state: &crate::state::State, source_id: String) -> anyhow::Result<()> {
+async fn install_source(state: &server::state::State, source_id: String) -> anyhow::Result<()> {
     let settings_guard = state.settings.lock().await.clone();
     if settings_guard.source_lists.is_empty() {
         println!("No source lists configured in settings.source_lists");
@@ -265,7 +275,10 @@ async fn install_source(state: &crate::state::State, source_id: String) -> anyho
     let found = match found {
         Some(s) => s,
         None => {
-            println!("Source id {} not found in configured source lists", source_id);
+            println!(
+                "Source id {} not found in configured source lists",
+                source_id
+            );
             return Ok(());
         }
     };
@@ -275,15 +288,21 @@ async fn install_source(state: &crate::state::State, source_id: String) -> anyho
 
     let mut sm = state.source_manager.lock().await;
     // call shared installer
-    shared::usecases::install_source(&mut *sm, &state.source_manager, &settings_guard.source_lists, src_id, domain)
-        .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    shared::usecases::install_source(
+        &mut *sm,
+        &state.source_manager,
+        &settings_guard.source_lists,
+        src_id,
+        domain,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     println!("Installed source {}", source_id);
     Ok(())
 }
 
-async fn install_all_sources(state: &crate::state::State) -> anyhow::Result<()> {
+async fn install_all_sources(state: &server::state::State) -> anyhow::Result<()> {
     let settings_guard = state.settings.lock().await.clone();
     if settings_guard.source_lists.is_empty() {
         println!("No source lists configured in settings.source_lists");
@@ -313,16 +332,22 @@ async fn install_all_sources(state: &crate::state::State) -> anyhow::Result<()> 
         let src_id = shared::model::SourceId::new(id.clone());
         // Install each source; don't hold the lock across await by cloning manager reference
         let arc_manager = state.source_manager.clone();
-        shared::usecases::install_source(&mut *sm, &arc_manager, &settings_guard.source_lists, src_id, domain)
-            .await
-            .map_err(|e| anyhow::anyhow!(format!("failed to install {}: {}", id, e)))?;
+        shared::usecases::install_source(
+            &mut *sm,
+            &arc_manager,
+            &settings_guard.source_lists,
+            src_id,
+            domain,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(format!("failed to install {}: {}", id, e)))?;
         println!("Installed {}", id);
     }
 
     Ok(())
 }
 
-async fn show_settings(state: &crate::state::State) -> anyhow::Result<()> {
+async fn show_settings(state: &server::state::State) -> anyhow::Result<()> {
     let settings = state.settings.lock().await.clone();
     println!("Settings ({}):", state.settings_path.display());
     println!("  storage_path: {:?}", settings.storage_path);
@@ -333,7 +358,7 @@ async fn show_settings(state: &crate::state::State) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn search_mangas(state: &crate::state::State, query: String) -> anyhow::Result<()> {
+async fn search_mangas(state: &server::state::State, query: String) -> anyhow::Result<()> {
     use shared::usecases::search_mangas;
     use tokio_util::sync::CancellationToken;
 
@@ -360,8 +385,18 @@ async fn search_mangas(state: &crate::state::State, query: String) -> anyhow::Re
 
     for m in mangas.iter().enumerate() {
         let (idx, manga) = m;
-        let title = manga.information.title.clone().unwrap_or_else(|| "<no title>".into());
-        println!("[{}] {}  -- {}:{}", idx, title, manga.information.id.source_id().value(), manga.information.id.value());
+        let title = manga
+            .information
+            .title
+            .clone()
+            .unwrap_or_else(|| "<no title>".into());
+        println!(
+            "[{}] {}  -- {}:{}",
+            idx,
+            title,
+            manga.information.id.source_id().value(),
+            manga.information.id.value()
+        );
     }
 
     if !errors.is_empty() {
@@ -375,20 +410,30 @@ async fn search_mangas(state: &crate::state::State, query: String) -> anyhow::Re
     Ok(())
 }
 
-async fn download_command(state: &crate::state::State, id: String, mode: String) -> anyhow::Result<()> {
+async fn download_command(
+    state: &crate::state::State,
+    id: String,
+    mode: String,
+) -> anyhow::Result<()> {
     use futures::StreamExt;
     use tokio_util::sync::CancellationToken;
 
-    use shared::usecases::{fetch_manga_chapters_in_batch, refresh_manga_details};
     use shared::usecases::fetch_manga_chapters_in_batch::Filter;
+    use shared::usecases::{fetch_manga_chapters_in_batch, refresh_manga_details};
 
     // Accept either "source:manga" or "source/manga"
     let (source_id_str, manga_id_str) = if id.contains(':') {
         let mut parts = id.splitn(2, ':');
-        (parts.next().unwrap().to_string(), parts.next().unwrap().to_string())
+        (
+            parts.next().unwrap().to_string(),
+            parts.next().unwrap().to_string(),
+        )
     } else if id.contains('/') {
         let mut parts = id.splitn(2, '/');
-        (parts.next().unwrap().to_string(), parts.next().unwrap().to_string())
+        (
+            parts.next().unwrap().to_string(),
+            parts.next().unwrap().to_string(),
+        )
     } else {
         println!("Invalid manga id format. Use source:manga_id");
         return Ok(());
@@ -415,7 +460,16 @@ async fn download_command(state: &crate::state::State, id: String, mode: String)
 
     // Ensure manga details cached
     println!("Refreshing manga details...");
-    match refresh_manga_details(&token, &*state.database, &chapter_storage, &source, &manga_id, 15).await {
+    match refresh_manga_details(
+        &token,
+        &*state.database,
+        &chapter_storage,
+        &source,
+        &manga_id,
+        15,
+    )
+    .await
+    {
         Ok(_) => {}
         Err(e) => println!("Warning: could not refresh manga details: {}", e),
     }

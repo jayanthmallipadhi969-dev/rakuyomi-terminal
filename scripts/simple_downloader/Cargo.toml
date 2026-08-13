@@ -1,0 +1,11 @@
+[package]
+name = "simple_downloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ureq = "2.6.1"
+zip = "0.6"
+anyhow = "1.0"
+indicatif = "0.17"
+url = "2.5"
