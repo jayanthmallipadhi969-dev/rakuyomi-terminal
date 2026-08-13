@@ -61,6 +61,44 @@ async fn repl_loop(state: crate::state::State) -> anyhow::Result<()> {
             "exit" | "quit" => break,
             "list-sources" => list_sources(&state).await?,
             "show-settings" => show_settings(&state).await?,
+            "set-storage-path" => {
+                if let Some(p) = parts.next() {
+                    set_storage_path(&state, p.to_string()).await?;
+                } else {
+                    println!("Usage: set-storage-path <path>");
+                }
+            }
+            "set-ram" => {
+                if let Some(flag) = parts.next() {
+                    set_ram(&state, flag.to_string()).await?;
+                } else {
+                    println!("Usage: set-ram <on|off>");
+                }
+            }
+            "set-concurrent" => {
+                if let Some(n) = parts.next() {
+                    set_concurrent(&state, n.to_string()).await?;
+                } else {
+                    println!("Usage: set-concurrent <n>");
+                }
+            }
+            "set-proxy" => {
+                if let Some(val) = parts.next() {
+                    set_proxy(&state, val.to_string()).await?;
+                } else {
+                    println!("Usage: set-proxy <url|none>");
+                }
+            }
+            "install-sources" => {
+                install_sources(&state).await?;
+            }
+            "install-source" => {
+                if let Some(src_id) = parts.next() {
+                    install_source(&state, src_id.to_string()).await?;
+                } else {
+                    println!("Usage: install-source <source_id>");
+                }
+            }
             "search" => {
                 let query = parts.collect::<Vec<_>>().join(" ");
                 if query.is_empty() {
@@ -91,6 +129,12 @@ fn print_help() {
     println!("  help               Show this help");
     println!("  list-sources       List installed sources");
     println!("  show-settings      Print current settings");
+    println!("  set-storage-path <path>   Set storage path and persist settings");
+    println!("  set-ram <on|off>          Enable/disable RAM-backed tmpfs storage");
+    println!("  set-concurrent <n>        Set concurrent requests for pages");
+    println!("  set-proxy <url|none>      Set or clear proxy URL");
+    println!("  install-sources           List available sources from settings.source_lists");
+    println!("  install-source <source_id>  Install a source by id (from source lists)");
     println!("  search <query>     Search across sources");
     println!("  download <src:manga> [unread|all]   Download manga chapters (default: unread)");
     println!("  exit, quit         Exit");
@@ -102,6 +146,136 @@ async fn list_sources(state: &crate::state::State) -> anyhow::Result<()> {
         let manifest = source.manifest();
         println!("{} - {}", manifest.info.id, manifest.info.name);
     }
+    Ok(())
+}
+
+async fn set_storage_path(state: &crate::state::State, path: String) -> anyhow::Result<()> {
+    let mut settings_guard = state.settings.lock().await;
+    settings_guard.storage_path = Some(PathBuf::from(path.clone()));
+    settings_guard
+        .save_to_file(&state.settings_path)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    // Update source manager with new settings (reload sources if needed)
+    let mut sm = state.source_manager.lock().await;
+    sm.update_settings(settings_guard.clone(), &state.source_manager)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    println!("storage_path set to {} and saved", path);
+    Ok(())
+}
+
+async fn set_ram(state: &crate::state::State, flag: String) -> anyhow::Result<()> {
+    let mut settings_guard = state.settings.lock().await;
+    match flag.as_str() {
+        "on" | "true" | "1" => {
+            settings_guard.ram_storage_enabled = true;
+            settings_guard
+                .save_to_file(&state.settings_path)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            // Try to enable RAM on chapter storage
+            let mut cs = state.chapter_storage.lock().await;
+            match cs.enable_ram(settings_guard.ram_storage_size_mb) {
+                Ok(_) => println!("RAM storage enabled (size {} MB)", settings_guard.ram_storage_size_mb),
+                Err(e) => println!("Failed to enable RAM storage: {}", e),
+            }
+        }
+        "off" | "false" | "0" => {
+            settings_guard.ram_storage_enabled = false;
+            settings_guard
+                .save_to_file(&state.settings_path)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+            let mut cs = state.chapter_storage.lock().await;
+            cs.disable_ram();
+            println!("RAM storage disabled");
+        }
+        other => println!("Unknown value for set-ram: {} (use on|off)", other),
+    }
+    Ok(())
+}
+
+async fn set_concurrent(state: &crate::state::State, n: String) -> anyhow::Result<()> {
+    let parsed = n.parse::<usize>().map_err(|_| anyhow::anyhow!("invalid number"))?;
+    let mut settings_guard = state.settings.lock().await;
+    settings_guard.concurrent_requests_pages = Some(parsed);
+    settings_guard
+        .save_to_file(&state.settings_path)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    println!("concurrent_requests_pages set to {}", parsed);
+    Ok(())
+}
+
+async fn set_proxy(state: &crate::state::State, val: String) -> anyhow::Result<()> {
+    let mut settings_guard = state.settings.lock().await;
+    if val.eq_ignore_ascii_case("none") || val.eq_ignore_ascii_case("null") {
+        settings_guard.proxy_url = None;
+        println!("proxy cleared");
+    } else {
+        settings_guard.proxy_url = Some(val.clone());
+        println!("proxy set to {}", val);
+    }
+    settings_guard
+        .save_to_file(&state.settings_path)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    // Update tls proxy in shared if available
+    shared::tls::set_proxy_url(settings_guard.proxy_url.clone());
+
+    Ok(())
+}
+
+async fn install_sources(state: &crate::state::State) -> anyhow::Result<()> {
+    let settings_guard = state.settings.lock().await.clone();
+    if settings_guard.source_lists.is_empty() {
+        println!("No source lists configured in settings.source_lists");
+        return Ok(());
+    }
+
+    println!("Fetching available sources from configured source lists...");
+    let available = shared::usecases::list_available_sources(settings_guard.source_lists.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    println!("Available sources:");
+    for src in available.iter() {
+        println!("{} - {}  (from {})", src.id.value(), src.name, src.source_of_source.clone().unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+async fn install_source(state: &crate::state::State, source_id: String) -> anyhow::Result<()> {
+    let settings_guard = state.settings.lock().await.clone();
+    if settings_guard.source_lists.is_empty() {
+        println!("No source lists configured in settings.source_lists");
+        return Ok(());
+    }
+
+    let available = shared::usecases::list_available_sources(settings_guard.source_lists.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let found = available.into_iter().find(|s| s.id.value() == &source_id);
+    let found = match found {
+        Some(s) => s,
+        None => {
+            println!("Source id {} not found in configured source lists", source_id);
+            return Ok(());
+        }
+    };
+
+    let domain = found.source_of_source.clone().unwrap_or_default();
+    let src_id = shared::model::SourceId::new(found.id.value().clone());
+
+    let mut sm = state.source_manager.lock().await;
+    // call shared installer
+    shared::usecases::install_source(&mut *sm, &state.source_manager, &settings_guard.source_lists, src_id, domain)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    println!("Installed source {}", source_id);
     Ok(())
 }
 
