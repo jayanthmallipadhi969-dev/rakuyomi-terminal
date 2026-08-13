@@ -99,6 +99,9 @@ async fn repl_loop(state: crate::state::State) -> anyhow::Result<()> {
                     println!("Usage: install-source <source_id>");
                 }
             }
+            "install-all-sources" => {
+                install_all_sources(&state).await?;
+            }
             "search" => {
                 let query = parts.collect::<Vec<_>>().join(" ");
                 if query.is_empty() {
@@ -135,6 +138,7 @@ fn print_help() {
     println!("  set-proxy <url|none>      Set or clear proxy URL");
     println!("  install-sources           List available sources from settings.source_lists");
     println!("  install-source <source_id>  Install a source by id (from source lists)");
+    println!("  install-all-sources       Install all available sources from settings.source_lists if not already installed");
     println!("  search <query>     Search across sources");
     println!("  download <src:manga> [unread|all]   Download manga chapters (default: unread)");
     println!("  exit, quit         Exit");
@@ -276,6 +280,45 @@ async fn install_source(state: &crate::state::State, source_id: String) -> anyho
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     println!("Installed source {}", source_id);
+    Ok(())
+}
+
+async fn install_all_sources(state: &crate::state::State) -> anyhow::Result<()> {
+    let settings_guard = state.settings.lock().await.clone();
+    if settings_guard.source_lists.is_empty() {
+        println!("No source lists configured in settings.source_lists");
+        return Ok(());
+    }
+
+    println!("Fetching available sources from configured source lists...");
+    let available = shared::usecases::list_available_sources(settings_guard.source_lists.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let mut sm = state.source_manager.lock().await;
+    let existing: std::collections::HashSet<String> = sm
+        .sources()
+        .into_iter()
+        .map(|s| s.manifest().info.id.clone())
+        .collect();
+
+    for src in available.into_iter() {
+        let id = src.id.value().clone();
+        if existing.contains(&id) {
+            println!("Skipping already installed source: {}", id);
+            continue;
+        }
+        println!("Installing {}...", id);
+        let domain = src.source_of_source.clone().unwrap_or_default();
+        let src_id = shared::model::SourceId::new(id.clone());
+        // Install each source; don't hold the lock across await by cloning manager reference
+        let arc_manager = state.source_manager.clone();
+        shared::usecases::install_source(&mut *sm, &arc_manager, &settings_guard.source_lists, src_id, domain)
+            .await
+            .map_err(|e| anyhow::anyhow!(format!("failed to install {}: {}", id, e)))?;
+        println!("Installed {}", id);
+    }
+
     Ok(())
 }
 
